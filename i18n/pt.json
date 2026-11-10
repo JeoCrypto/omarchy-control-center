@@ -1,0 +1,19 @@
+{
+  "title": "Central de Controlo",
+  "wifi": "Wi-Fi",
+  "bluetooth": "Bluetooth",
+  "on": "Ligado",
+  "off": "Desligado",
+  "not-connected": "Sem ligação",
+  "dnd": "Não Incomodar",
+  "nightlight": "Luz Noturna",
+  "awake": "Manter Ativo",
+  "display": "Ecrã",
+  "sound": "Som",
+  "glass": "Vidro",
+  "glass.clear": "Claro",
+  "glass.glass": "Vidro",
+  "glass.frosted": "Fosco",
+  "glass.solid": "Sólido",
+  "connected": "Ligado"
+}

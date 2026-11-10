@@ -1,0 +1,19 @@
+{
+  "title": "Control Center",
+  "wifi": "Wi-Fi",
+  "bluetooth": "Bluetooth",
+  "on": "On",
+  "off": "Off",
+  "not-connected": "Not connected",
+  "dnd": "Do Not Disturb",
+  "nightlight": "Night Light",
+  "awake": "Stay Awake",
+  "display": "Display",
+  "sound": "Sound",
+  "glass": "Glass",
+  "glass.clear": "Clear",
+  "glass.glass": "Glass",
+  "glass.frosted": "Frosted",
+  "glass.solid": "Solid",
+  "connected": "Connected"
+}

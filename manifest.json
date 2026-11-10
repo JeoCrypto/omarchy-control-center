@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.jeocrypto.control-center",
+  "name": "Control Center",
+  "version": "1.0.0",
+  "author": "JeoCrypto",
+  "description": "One bar button for the everyday switches: Wi-Fi, Bluetooth, Do Not Disturb, Night Light, Stay Awake, brightness, volume and glass level.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "Panel.qml"},
+  "barWidget": {
+    "displayName": "Control Center",
+    "description": "Quick toggles and sliders in one panel",
+    "category": "System",
+    "allowMultiple": false
+  }
+}

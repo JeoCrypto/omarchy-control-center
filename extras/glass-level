@@ -1,0 +1,94 @@
+#!/bin/bash
+
+# Glass level: one control for how see-through the desktop chrome is, like a
+# glass-strength slider. Moves the bar, dock, menus, popups and
+# notifications together, from ultra-clear to fully opaque.
+#
+#   glass-level                 print the current level
+#   glass-level clear|glass|frosted|solid
+#   glass-level next|prev       step through the levels
+#
+# State:   ~/.config/glass/level
+# Applies: ~/.config/omarchy/shell.toml  (managed block; the shell reloads it live)
+#          ~/.config/hypr/glass.lua      (reads the level: blur, window opacity, glass edges)
+#          Glass Dock and Control Center (watch the level file / ask this command)
+
+levels=(clear glass frosted solid)
+state="$HOME/.config/glass/level"
+shell_toml="$HOME/.config/omarchy/shell.toml"
+
+current=$(head -n1 "$state" 2>/dev/null)
+[[ " ${levels[*]} " == *" $current "* ]] || current=glass
+
+index_of() { for i in "${!levels[@]}"; do [[ ${levels[i]} == "$1" ]] && echo "$i"; done; }
+
+case ${1:-} in
+  "") echo "$current"; exit 0 ;;
+  next) level=${levels[$(( ($(index_of "$current") + 1) % ${#levels[@]} ))]} ;;
+  prev) level=${levels[$(( ($(index_of "$current") + ${#levels[@]} - 1) % ${#levels[@]} ))]} ;;
+  clear|glass|frosted|solid) level=$1 ;;
+  *) echo "Usage: glass-level [clear|glass|frosted|solid|next|prev]" >&2; exit 1 ;;
+esac
+
+#          bar   cards launcher
+case $level in
+  clear)   set -- 0.30 0.72 0.70 ;;
+  glass)   set -- 0.55 0.90 0.88 ;;
+  frosted) set -- 0.78 0.95 0.94 ;;
+  solid)   set -- 1.0  1.0  1.0  ;;
+esac
+bar=$1 cards=$2 launcher=$3
+
+# Glass edge: a hairline that is bright along the top and fades down the sides,
+# like light catching the rim of a pane.
+edge='rgba(ffffff5c) rgba(ffffff12) 90deg'
+
+mkdir -p "$(dirname "$state")" "$(dirname "$shell_toml")"
+echo "$level" >"$state"
+
+block=$(cat <<TOML
+# glass-level: start (managed by ~/.local/bin/glass-level; edits here are overwritten)
+[bar]
+background-alpha = $bar
+
+[popups]
+background-alpha = $cards
+border = "$edge"
+border-alpha = 1.0
+
+[notifications]
+background-alpha = $cards
+border = "$edge"
+border-alpha = 1.0
+
+[menu]
+background-alpha = $cards
+border = "$edge"
+border-alpha = 1.0
+
+[launcher]
+background-alpha = $launcher
+border = "$edge"
+border-alpha = 1.0
+
+[tooltip]
+border = "$edge"
+border-alpha = 1.0
+# glass-level: end
+TOML
+)
+
+# Replace the managed block, keeping everything else in the file (e.g. [font]).
+tmp=$(mktemp)
+if [[ -f $shell_toml ]]; then
+  sed '/^# glass-level: start/,/^# glass-level: end/d' "$shell_toml" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' >"$tmp"
+fi
+[[ -s $tmp ]] && echo >>"$tmp"
+echo "$block" >>"$tmp"
+cat "$tmp" >"$shell_toml"
+rm -f "$tmp"
+
+hyprctl reload >/dev/null 2>&1
+
+notify-send -t 1500 -h string:x-canonical-private-synchronous:glass-level "Glass: $level" 2>/dev/null
+echo "$level"

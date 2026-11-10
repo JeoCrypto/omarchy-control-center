@@ -1,0 +1,54 @@
+#!/bin/bash
+
+# Backend for the Control Center bar panel. The panel calls this script for
+# every read and every action, so each control can also be driven from a
+# terminal or a keybinding.
+#
+#   control-center status              JSON snapshot of every control
+#   control-center wifi|bluetooth|dnd|nightlight|awake|mute     toggle
+#   control-center brightness <0-100>
+#   control-center volume <0-100>
+#   control-center glass <clear|glass|frosted|solid>   (needs extras/glass-level)
+
+sink='@DEFAULT_AUDIO_SINK@'
+export LC_ALL=C
+
+status() {
+  local wifi ssid bt dnd night awake brightness volume muted glass vol_line
+  [[ $(nmcli radio wifi 2>/dev/null) == enabled ]] && wifi=true || wifi=false
+  ssid=$(nmcli -t -f active,ssid dev wifi list --rescan no 2>/dev/null | awk -F: '$1 == "yes" { sub(/^yes:/, ""); print; exit }')
+  omarchy-bluetooth-power is-on >/dev/null 2>&1 && bt=true || bt=false
+  [[ $(omarchy-shell notifications isDnd 2>/dev/null) == on ]] && dnd=true || dnd=false
+  night=$(omarchy-toggle-nightlight --status 2>/dev/null | jq -r '.enabled // false' 2>/dev/null)
+  awake=$(omarchy-toggle-idle status 2>/dev/null | jq -r '.enabled // false' 2>/dev/null)
+  brightness=$(brightnessctl -c backlight -m 2>/dev/null | awk -F, 'NR == 1 { gsub("%", "", $4); print $4 }')
+  vol_line=$(wpctl get-volume "$sink" 2>/dev/null)
+  volume=$(awk '{ printf "%d", $2 * 100 + 0.5 }' <<<"$vol_line")
+  [[ $vol_line == *MUTED* ]] && muted=true || muted=false
+  glass=$(command -v glass-level >/dev/null && glass-level 2>/dev/null)
+
+  jq -cn \
+    --argjson wifi "$wifi" --arg ssid "$ssid" --argjson bluetooth "$bt" --argjson dnd "$dnd" \
+    --argjson nightlight "${night:-false}" --argjson awake "${awake:-false}" \
+    --arg brightness "${brightness:-}" --arg volume "${volume:-0}" --argjson muted "$muted" --arg glass "${glass:-}" \
+    '{ wifi: $wifi, ssid: $ssid, bluetooth: $bluetooth, dnd: $dnd, nightlight: $nightlight, awake: $awake,
+       brightness: (if $brightness == "" then null else ($brightness | tonumber) end),
+       volume: ($volume | tonumber), muted: $muted, glass: $glass }'
+}
+
+percent() { [[ ${1:-} =~ ^[0-9]+$ ]] && (( $1 <= 100 )) || { echo "Expected 0-100" >&2; exit 1; }; }
+
+case ${1:-} in
+  status) status ;;
+  wifi) [[ $(nmcli radio wifi) == enabled ]] && nmcli radio wifi off || nmcli radio wifi on ;;
+  bluetooth) omarchy-bluetooth-power toggle ;;
+  dnd) omarchy-toggle-notification-silencing >/dev/null ;;
+  nightlight) omarchy-toggle-nightlight >/dev/null ;;
+  awake) omarchy-toggle-idle toggle >/dev/null ;;
+  mute) wpctl set-mute "$sink" toggle ;;
+  brightness) percent "${2:-}"; omarchy-brightness-display --no-osd "$2%" >/dev/null ;;
+  volume) percent "${2:-}"; wpctl set-volume "$sink" "$2%" ;;
+  glass) command -v glass-level >/dev/null || { echo "glass-level is not installed (see extras/ in the README)" >&2; exit 1; }
+    glass-level "${2:-}" >/dev/null ;;
+  *) echo "Usage: control-center status | wifi | bluetooth | dnd | nightlight | awake | mute | brightness <0-100> | volume <0-100> | glass <level>" >&2; exit 1 ;;
+esac
