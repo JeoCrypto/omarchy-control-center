@@ -1,94 +1,338 @@
-#!/bin/bash
+#!/usr/bin/env python3
+"""Glass level: one control for how see-through the desktop chrome is, like a
+glass-strength slider. Moves the bar, dock, menus, popups and notifications
+together, from ultra-clear to fully opaque.
 
-# Glass level: one control for how see-through the desktop chrome is, like a
-# glass-strength slider. Moves the bar, dock, menus, popups and
-# notifications together, from ultra-clear to fully opaque.
-#
-#   glass-level                 print the current level
-#   glass-level clear|glass|frosted|solid
-#   glass-level next|prev       step through the levels
-#
-# State:   ~/.config/glass/level
-# Applies: ~/.config/omarchy/shell.toml  (managed block; the shell reloads it live)
-#          ~/.config/hypr/glass.lua      (reads the level: blur, window opacity, glass edges)
-#          Glass Dock and Control Center (watch the level file / ask this command)
+  glass-level                 print the current level
+  glass-level clear|glass|frosted|solid
+  glass-level next|prev       step through the levels
 
-levels=(clear glass frosted solid)
-state="$HOME/.config/glass/level"
-shell_toml="$HOME/.config/omarchy/shell.toml"
+State:   ~/.config/glass/level
+Applies: ~/.config/omarchy/shell.toml  (a few keys, each marked "# glass-level";
+                                        the shell reloads the file live)
+         ~/.config/hypr/glass.lua      (reads the level: blur, window opacity, glass edges)
+         Glass Dock and Control Center (watch the level file / ask this command)
 
-current=$(head -n1 "$state" 2>/dev/null)
-[[ " ${levels[*]} " == *" $current "* ]] || current=glass
+Changing the level is one transaction. Under a lock shared by every run of
+this command, the keys are merged into shell.toml (other settings and existing
+tables are kept), the result is checked, and the file is swapped into place in
+one step with its permissions kept. The level file is written only after that
+succeeded. If anything fails or the run is interrupted, shell.toml is left
+exactly as it was.
+"""
+import fcntl
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
 
-index_of() { for i in "${!levels[@]}"; do [[ ${levels[i]} == "$1" ]] && echo "$i"; done; }
-
-case ${1:-} in
-  "") echo "$current"; exit 0 ;;
-  next) level=${levels[$(( ($(index_of "$current") + 1) % ${#levels[@]} ))]} ;;
-  prev) level=${levels[$(( ($(index_of "$current") + ${#levels[@]} - 1) % ${#levels[@]} ))]} ;;
-  clear|glass|frosted|solid) level=$1 ;;
-  *) echo "Usage: glass-level [clear|glass|frosted|solid|next|prev]" >&2; exit 1 ;;
-esac
-
-#          bar   cards launcher
-case $level in
-  clear)   set -- 0.30 0.72 0.70 ;;
-  glass)   set -- 0.55 0.90 0.88 ;;
-  frosted) set -- 0.78 0.95 0.94 ;;
-  solid)   set -- 1.0  1.0  1.0  ;;
-esac
-bar=$1 cards=$2 launcher=$3
-
+LEVELS = ['clear', 'glass', 'frosted', 'solid']
+#            bar     cards   launcher
+ALPHAS = {
+    'clear':   ('0.30', '0.72', '0.70'),
+    'glass':   ('0.55', '0.90', '0.88'),
+    'frosted': ('0.78', '0.95', '0.94'),
+    'solid':   ('1.0',  '1.0',  '1.0'),
+}
 # Glass edge: a hairline that is bright along the top and fades down the sides,
 # like light catching the rim of a pane.
-edge='rgba(ffffff5c) rgba(ffffff12) 90deg'
+EDGE = '"rgba(ffffff5c) rgba(ffffff12) 90deg"'
+MARK = '# glass-level'
+LEGACY_START = '# glass-level: start'
+LEGACY_END = '# glass-level: end'
+MAX_BYTES = 1024 * 1024
+LOCK_WAIT = 5.0
+TEMP_PREFIX = '.glass-level.'
 
-mkdir -p "$(dirname "$state")" "$(dirname "$shell_toml")"
-echo "$level" >"$state"
 
-block=$(cat <<TOML
-# glass-level: start (managed by ~/.local/bin/glass-level; edits here are overwritten)
-[bar]
-background-alpha = $bar
+class Failure(Exception):
+    pass
 
-[popups]
-background-alpha = $cards
-border = "$edge"
-border-alpha = 1.0
 
-[notifications]
-background-alpha = $cards
-border = "$edge"
-border-alpha = 1.0
+def wanted(level):
+    """The keys this command owns, as {table: {key: TOML value}}."""
+    bar, cards, launcher = ALPHAS[level]
+    edge = {'border': EDGE, 'border-alpha': '1.0'}
+    return {
+        'bar': {'background-alpha': bar},
+        'popups': {'background-alpha': cards, **edge},
+        'notifications': {'background-alpha': cards, **edge},
+        'menu': {'background-alpha': cards, **edge},
+        'launcher': {'background-alpha': launcher, **edge},
+        'tooltip': dict(edge),
+    }
 
-[menu]
-background-alpha = $cards
-border = "$edge"
-border-alpha = 1.0
 
-[launcher]
-background-alpha = $launcher
-border = "$edge"
-border-alpha = 1.0
+HEADER = re.compile(r'^\s*\[\s*([^\[\]]+?)\s*\]\s*(#.*)?$')
+ANY_HEADER = re.compile(r'^\s*\[')
 
-[tooltip]
-border = "$edge"
-border-alpha = 1.0
-# glass-level: end
-TOML
-)
 
-# Replace the managed block, keeping everything else in the file (e.g. [font]).
-tmp=$(mktemp)
-if [[ -f $shell_toml ]]; then
-  sed '/^# glass-level: start/,/^# glass-level: end/d' "$shell_toml" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' >"$tmp"
-fi
-[[ -s $tmp ]] && echo >>"$tmp"
-echo "$block" >>"$tmp"
-cat "$tmp" >"$shell_toml"
-rm -f "$tmp"
+def without_legacy_block(lines):
+    """Earlier versions kept their keys in one marked block; take it out."""
+    kept, inside = [], False
+    for line in lines:
+        if line.startswith(LEGACY_START):
+            inside = True
+        elif inside and line.startswith(LEGACY_END):
+            inside = False
+        elif not inside:
+            kept.append(line)
+    while kept and kept[-1].strip() == '':
+        kept.pop()
+    return kept
 
-hyprctl reload >/dev/null 2>&1
 
-notify-send -t 1500 -h string:x-canonical-private-synchronous:glass-level "Glass: $level" 2>/dev/null
-echo "$level"
+def merge(text, level):
+    """Return `text` with this level's keys set in their tables.
+
+    A key that exists is replaced where it is; a missing key is added at the
+    end of its table; a missing table is added at the end of the file.
+    """
+    lines = without_legacy_block(text.split('\n'))
+    for table, keys in wanted(level).items():
+        start = next((i for i, line in enumerate(lines)
+                      if (m := HEADER.match(line)) and m.group(1) == table), None)
+        if start is None:
+            if lines:
+                lines.append('')
+            lines.append(f'[{table}]')
+            lines.extend(f'{key} = {value}  {MARK}' for key, value in keys.items())
+            continue
+        end = next((i for i in range(start + 1, len(lines)) if ANY_HEADER.match(lines[i])), len(lines))
+        for key, value in keys.items():
+            setting = f'{key} = {value}  {MARK}'
+            pattern = re.compile(r'^\s*' + re.escape(key) + r'\s*=')
+            at = next((i for i in range(start + 1, end) if pattern.match(lines[i])), None)
+            if at is not None:
+                lines[at] = setting
+                continue
+            last = start
+            for i in range(start + 1, end):
+                if lines[i].strip():
+                    last = i
+            lines.insert(last + 1, setting)
+            end += 1
+    return '\n'.join(lines) + '\n'
+
+
+def parse(text, what):
+    import tomllib
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise Failure(f'{what} is not valid TOML ({error}); nothing was changed.')
+
+
+def check(before_text, after_text, level):
+    """The result must parse, hold this level's values, and keep everything else."""
+    legacy_free = '\n'.join(without_legacy_block(before_text.split('\n'))) + '\n'
+    before = parse(legacy_free, 'shell.toml')
+    after = parse(after_text, 'The updated shell.toml')
+    for table, keys in wanted(level).items():
+        section = after.get(table)
+        if not isinstance(section, dict):
+            raise Failure(f'Could not set [{table}] in shell.toml; nothing was changed.')
+        for key, value in keys.items():
+            if section.get(key) != parse(f'v = {value}', 'value')['v']:
+                raise Failure(f'Could not set {key} in [{table}]; nothing was changed.')
+        for data in (before, after):
+            part = data.get(table)
+            if isinstance(part, dict):
+                for key in keys:
+                    part.pop(key, None)
+                if not part:
+                    del data[table]
+    if before != after:
+        raise Failure('The update would have changed other settings in shell.toml; nothing was changed.')
+
+
+def signature(path):
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def read_text(path):
+    try:
+        with open(path, 'rb') as handle:
+            data = handle.read(MAX_BYTES + 1)
+    except FileNotFoundError:
+        return ''
+    if len(data) > MAX_BYTES:
+        raise Failure(f'{path} is larger than expected; nothing was changed.')
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        raise Failure(f'{path} is not UTF-8 text; nothing was changed.')
+
+
+def remove_stale_temps(folder):
+    """Temporary files left by a run that was killed."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
+        if name.startswith(TEMP_PREFIX):
+            try:
+                os.unlink(os.path.join(folder, name))
+            except OSError:
+                pass
+
+
+def write_temp(folder, text, mode):
+    fd, temp = tempfile.mkstemp(prefix=TEMP_PREFIX, dir=folder)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, mode)
+    except BaseException:
+        discard(temp)
+        raise
+    return temp
+
+
+def discard(temp):
+    try:
+        os.unlink(temp)
+    except OSError:
+        pass
+
+
+def replace(temp, target):
+    """Swap the finished file into place in one step."""
+    try:
+        os.replace(temp, target)
+    except BaseException:
+        discard(temp)
+        raise
+    try:
+        folder = os.open(os.path.dirname(target), os.O_RDONLY)
+        try:
+            os.fsync(folder)
+        finally:
+            os.close(folder)
+    except OSError:
+        pass
+
+
+def update_shell_toml(path, level):
+    # Follow a symlink (dotfiles), so the link stays and its target is updated.
+    target = os.path.realpath(path)
+    folder = os.path.dirname(target)
+    os.makedirs(folder, exist_ok=True)
+    remove_stale_temps(folder)
+    for _ in range(3):
+        seen = signature(target)
+        before = read_text(target)
+        after = merge(before, level)
+        check(before, after, level)
+        if after == before:
+            return
+        mode = (os.stat(target).st_mode & 0o7777) if seen else 0o644
+        temp = write_temp(folder, after, mode)
+        # Something else changed the file meanwhile: start again from its new contents.
+        if signature(target) != seen:
+            discard(temp)
+            continue
+        replace(temp, target)
+        return
+    raise Failure('shell.toml kept changing while it was being updated; nothing was changed.')
+
+
+def write_level(path, level):
+    folder = os.path.dirname(path)
+    remove_stale_temps(folder)
+    replace(write_temp(folder, level + '\n', 0o644), path)
+
+
+class Lock:
+    """One lock for every run of this command, so two changes never interleave."""
+
+    def __init__(self, path):
+        self.path = path
+        self.handle = None
+
+    def __enter__(self):
+        self.handle = open(self.path, 'a')
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    self.handle.close()
+                    raise Failure('Another glass-level change is still running; nothing was changed.')
+                time.sleep(0.05)
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.handle, fcntl.LOCK_UN)
+        self.handle.close()
+
+
+def current_level(state):
+    try:
+        with open(state, encoding='utf-8', errors='replace') as handle:
+            level = handle.readline(64).strip()
+    except OSError:
+        level = ''
+    return level if level in LEVELS else 'glass'
+
+
+def quiet(command):
+    try:
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def main(argv):
+    home = os.path.expanduser('~')
+    state = os.path.join(home, '.config/glass/level')
+    shell_toml = os.path.join(home, '.config/omarchy/shell.toml')
+    choice = argv[1] if len(argv) > 1 else ''
+
+    if choice == '':
+        print(current_level(state))
+        return 0
+    if choice not in LEVELS + ['next', 'prev'] or len(argv) > 2:
+        print('Usage: glass-level [clear|glass|frosted|solid|next|prev]', file=sys.stderr)
+        return 1
+
+    # Stop cleanly when asked to, so no half-written temporary file stays behind.
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, lambda *_: sys.exit(1))
+
+    try:
+        os.makedirs(os.path.dirname(state), exist_ok=True)
+        with Lock(os.path.join(os.path.dirname(state), '.lock')):
+            if choice in ('next', 'prev'):
+                step = 1 if choice == 'next' else -1
+                level = LEVELS[(LEVELS.index(current_level(state)) + step) % len(LEVELS)]
+            else:
+                level = choice
+            update_shell_toml(shell_toml, level)
+            write_level(state, level)
+    except Failure as failure:
+        print(f'glass-level: {failure}', file=sys.stderr)
+        return 1
+    except OSError as error:
+        print(f'glass-level: {error}; the level was not changed.', file=sys.stderr)
+        return 1
+
+    quiet(['hyprctl', 'reload'])
+    quiet(['notify-send', '-t', '1500', '-h', 'string:x-canonical-private-synchronous:glass-level', f'Glass: {level}'])
+    print(level)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

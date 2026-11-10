@@ -151,10 +151,19 @@ omarchy plugin remove io.github.jeocrypto.control-center
 
 If you installed glass level, [docs/glass-level.md](docs/glass-level.md#remove) lists the three things to take out.
 
+## Development
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Tests cover the helper runner (one report per run, including a helper that cannot be started or overruns, and no processes left behind) and `glass-level` (existing tables, the block from earlier versions, invalid files, interrupted and concurrent updates, permissions and symlinks). The Quickshell cases run in a throwaway Quickshell instance and are skipped without Quickshell and a Wayland session. `glass-level` is tested against a temporary home folder; your settings are not touched.
+
 ## Requirements
 
 - Omarchy 4 (Hyprland 0.55+ with Lua config, Quickshell 0.3+)
 - `nmcli`, `brightnessctl`, `wpctl` and `jq`, which Omarchy includes
+- Glass level (optional): Python 3.11 or newer, which Omarchy includes
 
 Built and tested on Omarchy 4.5.0 on a laptop with one display.
 
@@ -169,4 +178,4 @@ Built and tested on Omarchy 4.5.0 on a laptop with one display.
   <a href="https://github.com/JeoCrypto/omarchy-snap-layouts">Snap Layouts</a>
 </p>
 
-<p align="center"><sub>MIT licence</sub></p>
+<p align="center"><sub>Contributed by <a href="https://vgsi.pt">VGSI</a> · MIT licence</sub></p>

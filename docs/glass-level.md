@@ -44,8 +44,10 @@ Percentages are how opaque the surface is.
 `glass-level` changes three things and nothing else:
 
 1. **`~/.config/glass/level`**: one word, the current level. [Glass Dock](https://github.com/JeoCrypto/omarchy-glass-dock) watches this file.
-2. **A marked block in `~/.config/omarchy/shell.toml`**, between `# glass-level: start` and `# glass-level: end`. This is Omarchy's own per-machine override file for shell surfaces, and the shell reloads it live. The block sets the background opacity of the bar, popups, notifications, menu and launcher, and their glass-edge borders. Anything else in the file, such as the `[font]` section that `omarchy display text size` writes, is left alone.
+2. **A few keys in `~/.config/omarchy/shell.toml`**, each ending in `# glass-level`. This is Omarchy's own per-machine override file for shell surfaces, and the shell reloads it live. The keys set the background opacity of the bar, popups, notifications, menu and launcher, and their glass-edge borders. They are merged into the tables you already have: a `[bar]` of your own keeps its other settings and is not repeated. Anything else in the file, such as the `[font]` section that `omarchy display text size` writes, is left alone.
 3. **It runs `hyprctl reload`**, so Hyprland runs `glass.lua` again.
+
+**How the file is changed.** Each change is one transaction: one `glass-level` runs at a time (a lock in `~/.config/glass/.lock`), the new contents are checked to be valid and to differ from the old only in these keys, and the file is swapped into place in one step with its permissions kept. `~/.config/glass/level` is written only after that. If the check fails or the command is interrupted, `shell.toml` stays exactly as it was and the command says why. A `shell.toml` that is a symlink stays a symlink. A block between `# glass-level: start` and `# glass-level: end` from version 1.0.1 or earlier is converted the first time you change the level.
 
 `glass.lua` is read-only: it reads the level and the theme's accent colour, then sets blur, the opacity of windows Omarchy tags as see-through, a blur rule for the shell's layers, and gradient window borders. It overrides these Hyprland settings from wherever else you set them: `decoration.inactive_opacity`, `decoration.blur.enabled/size/passes`, and `general.col.active_border/inactive_border`.
 
@@ -54,11 +56,12 @@ Percentages are how opaque the surface is.
 - Unfocused windows are no longer slightly see-through; `inactive_opacity` is set to 1. If your theme dims inactive windows, that still applies.
 - The window border colours come from `glass.lua`, not the theme's `hyprland.lua`. The focused border uses the theme's `accent`; the unfocused border is a faint white.
 - The values are plain tables at the top of both files. Edit them to taste.
+- `glass-level` is a Python 3 script (3.11 or newer, which Omarchy includes).
 
 ## Remove
 
 1. Delete the `dofile(...)` line from `~/.config/hypr/looknfeel.lua`.
-2. Delete the block between `# glass-level: start` and `# glass-level: end` in `~/.config/omarchy/shell.toml`.
-3. Remove the files: `rm ~/.local/bin/glass-level ~/.config/hypr/glass.lua ~/.config/glass/level`
+2. Delete the lines ending in `# glass-level` in `~/.config/omarchy/shell.toml`: `sed -i '/# glass-level$/d' ~/.config/omarchy/shell.toml`
+3. Remove the files: `rm -r ~/.local/bin/glass-level ~/.config/hypr/glass.lua ~/.config/glass`
 
 Run `hyprctl reload` afterwards.
