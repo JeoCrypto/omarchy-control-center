@@ -84,15 +84,29 @@ Panel {
   function glyph(code) { return String.fromCodePoint(code) }
 
   // ---- State ----
-  function refresh() { if (!probe.running) probe.running = true }
+  function refresh() { probe.start() }
 
-  Process {
+  // Every backend run is time-limited with capped output (BoundedRun), so a
+  // stalled network or audio tool can't hold the shell or pile up processes.
+  BoundedRun {
     id: probe
-    command: ["bash", root.backendPath, "status"]
-    stdout: StdioCollector { id: probeOut; waitForEnd: true }
-    onExited: function() {
+    seconds: 6
+    maxBytes: 16384
+    argv: ["bash", root.backendPath, "status"]
+    onFinished: function(exitCode, output) {
+      if (exitCode !== 0) return
       try {
-        const next = JSON.parse(probeOut.text)
+        const raw = JSON.parse(output)
+        // Take only the fields the panel knows, in the types it expects. The
+        // network name comes from outside this machine: keep it short.
+        const next = {
+          wifi: raw.wifi === true, ssid: String(raw.ssid || "").slice(0, 64), bluetooth: raw.bluetooth === true,
+          dnd: raw.dnd === true, nightlight: raw.nightlight === true, awake: raw.awake === true,
+          brightness: typeof raw.brightness === "number" ? Math.max(0, Math.min(100, raw.brightness)) : null,
+          volume: typeof raw.volume === "number" ? Math.max(0, Math.min(100, raw.volume)) : 0,
+          muted: raw.muted === true,
+          glass: ["clear", "glass", "frosted", "solid"].indexOf(raw.glass) >= 0 ? raw.glass : ""
+        }
         root.status = next
         // Never fight the pointer: a slider being dragged keeps its own value.
         if (!root.brightnessBusy && next.brightness !== null) root.brightness = next.brightness
@@ -111,15 +125,36 @@ Panel {
     const next = Object.assign({}, root.status)
     next[key === "mute" ? "muted" : key] = !next[key === "mute" ? "muted" : key]
     root.status = next
-    Quickshell.execDetached(["bash", root.backendPath, key])
-    settle.restart()
+    runAction([key])
   }
 
   function setGlass(level) {
     const next = Object.assign({}, root.status)
     next.glass = level
     root.status = next
-    Quickshell.execDetached(["bash", root.backendPath, "glass", level])
+    runAction(["glass", level])
+  }
+
+  // Switches run one at a time through an owned, time-limited process. When
+  // it ends, successfully or not, the controls are read again, so a switch
+  // that failed goes back to what the system really says.
+  property var actionQueue: []
+  function runAction(args) {
+    if (actionQueue.length >= 8) return
+    actionQueue = actionQueue.concat([args])
+    pumpActions()
+  }
+  function pumpActions() {
+    if (action.running || actionQueue.length === 0) return
+    const args = actionQueue[0]
+    actionQueue = actionQueue.slice(1)
+    action.start(["bash", root.backendPath].concat(args))
+  }
+  BoundedRun {
+    id: action
+    seconds: 8
+    maxBytes: 4096
+    onFinished: { if (root.actionQueue.length > 0) root.pumpActions(); else settle.restart() }
   }
 
   // Sliders send at most one command at a time; the latest value waits its turn.
@@ -137,11 +172,11 @@ Panel {
   }
   function pumpBrightness() {
     if (brightnessProc.running || root.brightnessPending < 0) return
-    brightnessProc.command = ["bash", root.backendPath, "brightness", String(root.brightnessPending)]
+    const value = String(root.brightnessPending)
     root.brightnessPending = -1
-    brightnessProc.running = true
+    brightnessProc.start(["bash", root.backendPath, "brightness", value])
   }
-  Process { id: brightnessProc; onExited: root.pumpBrightness() }
+  BoundedRun { id: brightnessProc; seconds: 4; maxBytes: 4096; onFinished: root.pumpBrightness() }
 
   function setVolume(v) {
     root.volume = v
@@ -150,11 +185,11 @@ Panel {
   }
   function pumpVolume() {
     if (volumeProc.running || root.volumePending < 0) return
-    volumeProc.command = ["bash", root.backendPath, "volume", String(root.volumePending)]
+    const value = String(root.volumePending)
     root.volumePending = -1
-    volumeProc.running = true
+    volumeProc.start(["bash", root.backendPath, "volume", value])
   }
-  Process { id: volumeProc; onExited: root.pumpVolume() }
+  BoundedRun { id: volumeProc; seconds: 4; maxBytes: 4096; onFinished: root.pumpVolume() }
 
   // ---- Bar button ----
   BarIconButton {
