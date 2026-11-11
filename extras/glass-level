@@ -13,12 +13,20 @@ Applies: ~/.config/omarchy/shell.toml  (a few keys, each marked "# glass-level";
          ~/.config/hypr/glass.lua      (reads the level: blur, window opacity, glass edges)
          Glass Dock and Control Center (watch the level file / ask this command)
 
-Changing the level is one transaction. Under a lock shared by every run of
-this command, the keys are merged into shell.toml (other settings and existing
-tables are kept), the result is checked, and the file is swapped into place in
-one step with its permissions kept. The level file is written only after that
-succeeded. If anything fails or the run is interrupted, shell.toml is left
-exactly as it was.
+Changing the level is one transaction over two files. Under a lock shared by
+every run of this command, the keys are merged into shell.toml (other settings
+and existing tables are kept), the result is checked, and the file is swapped
+into place in one step with its permissions kept. Then the level file is
+written the same way.
+
+  - If anything fails before shell.toml is swapped, nothing was changed.
+  - If the level file cannot be written after that, shell.toml is put back.
+  - Stop requests (TERM, INT, HUP) wait until both files are done.
+  - The level being set is noted in ~/.config/glass/.pending for the length
+    of the change. A run that was killed between the two files, or could not
+    put shell.toml back, leaves that note behind, and the next run of this
+    command (any form, including the one that only prints) finishes the
+    change: if shell.toml holds the noted level, the level file is set to it.
 """
 import fcntl
 import os
@@ -46,6 +54,7 @@ LEGACY_END = '# glass-level: end'
 MAX_BYTES = 1024 * 1024
 LOCK_WAIT = 5.0
 TEMP_PREFIX = '.glass-level.'
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
 
 class Failure(Exception):
@@ -149,6 +158,17 @@ def check(before_text, after_text, level):
         raise Failure('The update would have changed other settings in shell.toml; nothing was changed.')
 
 
+def holds(text, level):
+    """Whether shell.toml already has every value of this level."""
+    try:
+        data = parse(text, 'shell.toml')
+        return all(isinstance(data.get(table), dict)
+                   and data[table].get(key) == parse(f'v = {value}', 'value')['v']
+                   for table, keys in wanted(level).items() for key, value in keys.items())
+    except Failure:
+        return False
+
+
 def signature(path):
     try:
         st = os.stat(path)
@@ -224,6 +244,8 @@ def replace(temp, target):
 
 
 def update_shell_toml(path, level):
+    """Swap the merged file into place. Returns what is needed to put the old
+    one back, or None if the file already had this level."""
     # Follow a symlink (dotfiles), so the link stays and its target is updated.
     target = os.path.realpath(path)
     folder = os.path.dirname(target)
@@ -235,7 +257,7 @@ def update_shell_toml(path, level):
         after = merge(before, level)
         check(before, after, level)
         if after == before:
-            return
+            return None
         mode = (os.stat(target).st_mode & 0o7777) if seen else 0o644
         temp = write_temp(folder, after, mode)
         # Something else changed the file meanwhile: start again from its new contents.
@@ -243,8 +265,20 @@ def update_shell_toml(path, level):
             discard(temp)
             continue
         replace(temp, target)
-        return
+        return {'target': target, 'existed': seen is not None, 'text': before,
+                'mode': mode, 'now': signature(target)}
     raise Failure('shell.toml kept changing while it was being updated; nothing was changed.')
+
+
+def put_back(change):
+    """Undo update_shell_toml, unless the file was changed again since."""
+    if change is None or signature(change['target']) != change['now']:
+        raise Failure('shell.toml could not be put back.')
+    if change['existed']:
+        folder = os.path.dirname(change['target'])
+        replace(write_temp(folder, change['text'], change['mode']), change['target'])
+    else:
+        os.unlink(change['target'])
 
 
 def write_level(path, level):
@@ -253,16 +287,62 @@ def write_level(path, level):
     replace(write_temp(folder, level + '\n', 0o644), path)
 
 
+def apply(shell_toml, state, pending, level):
+    """Commit both files, or neither. Called with the lock held."""
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+    try:
+        write_level(pending, level)          # note what is about to be set
+        try:
+            change = update_shell_toml(shell_toml, level)
+        except BaseException:
+            discard(pending)                 # nothing was committed
+            raise
+        try:
+            write_level(state, level)
+        except OSError as error:
+            try:
+                put_back(change)
+            except (OSError, Failure):
+                # The note stays, so the next run finishes the change.
+                raise Failure(f'shell.toml is set to {level}, but the level file could not be written '
+                              f'({error}). The next run of glass-level finishes the change.')
+            discard(pending)
+            raise Failure(f'The level file could not be written ({error}); '
+                          'shell.toml was put back and nothing was changed.')
+        discard(pending)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+
+
+def recover(shell_toml, state, pending):
+    """Finish a change that an earlier run left half done. Called with the lock
+    held. Returns True if the level file was brought up to date."""
+    try:
+        with open(pending, encoding='utf-8', errors='replace') as handle:
+            level = handle.readline(64).strip()
+    except OSError:
+        return False
+    # shell.toml is swapped first, so it tells whether that change got as far
+    # as being committed. If it did, the level file follows; if not, the
+    # change never happened and only the note is removed.
+    finished = level in LEVELS and holds(read_text(os.path.realpath(shell_toml)), level)
+    if finished:
+        write_level(state, level)
+    discard(pending)
+    return finished
+
+
 class Lock:
     """One lock for every run of this command, so two changes never interleave."""
 
-    def __init__(self, path):
+    def __init__(self, path, wait=None):
         self.path = path
+        self.wait = wait
         self.handle = None
 
     def __enter__(self):
         self.handle = open(self.path, 'a')
-        deadline = time.monotonic() + LOCK_WAIT
+        deadline = time.monotonic() + (LOCK_WAIT if self.wait is None else self.wait)
         while True:
             try:
                 fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -298,9 +378,19 @@ def main(argv):
     home = os.path.expanduser('~')
     state = os.path.join(home, '.config/glass/level')
     shell_toml = os.path.join(home, '.config/omarchy/shell.toml')
+    pending = os.path.join(os.path.dirname(state), '.pending')
+    lock = os.path.join(os.path.dirname(state), '.lock')
     choice = argv[1] if len(argv) > 1 else ''
 
     if choice == '':
+        if os.path.exists(pending):
+            try:
+                with Lock(lock, wait=1.0):
+                    finished = recover(shell_toml, state, pending)
+                if finished:
+                    quiet(['hyprctl', 'reload'])
+            except (Failure, OSError):
+                pass    # a change is running, or it still cannot be finished
         print(current_level(state))
         return 0
     if choice not in LEVELS + ['next', 'prev'] or len(argv) > 2:
@@ -308,19 +398,19 @@ def main(argv):
         return 1
 
     # Stop cleanly when asked to, so no half-written temporary file stays behind.
-    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    for number in STOP_SIGNALS:
         signal.signal(number, lambda *_: sys.exit(1))
 
     try:
         os.makedirs(os.path.dirname(state), exist_ok=True)
-        with Lock(os.path.join(os.path.dirname(state), '.lock')):
+        with Lock(lock):
+            recover(shell_toml, state, pending)
             if choice in ('next', 'prev'):
                 step = 1 if choice == 'next' else -1
                 level = LEVELS[(LEVELS.index(current_level(state)) + step) % len(LEVELS)]
             else:
                 level = choice
-            update_shell_toml(shell_toml, level)
-            write_level(state, level)
+            apply(shell_toml, state, pending, level)
     except Failure as failure:
         print(f'glass-level: {failure}', file=sys.stderr)
         return 1

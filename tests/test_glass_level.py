@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import sys
@@ -39,6 +40,7 @@ class Home:
         self.home = Path(self.dir.name)
         self.toml = self.home / '.config/omarchy/shell.toml'
         self.level = self.home / '.config/glass/level'
+        self.pending = self.home / '.config/glass/.pending'
         self.toml.parent.mkdir(parents=True)
         self.level.parent.mkdir(parents=True)
         bin_dir = self.home / 'bin'
@@ -126,6 +128,108 @@ class GlassLevelTests(unittest.TestCase):
         self.assertEqual(self.h.toml.read_text(), original)
         self.assertEqual(self.h.level.read_text(), 'glass\n')
         self.assertEqual(self.h.leftovers(), [])
+
+    def failing_replace(self, *names):
+        """os.replace that fails, in order, for the destinations named."""
+        real, left = os.replace, list(names)
+
+        def replace(src, dst):
+            if left and Path(dst).name == left[0]:
+                left.pop(0)
+                raise OSError('disk full')
+            return real(src, dst)
+
+        return patch.object(g.os, 'replace', side_effect=replace)
+
+    def test_level_file_failure_puts_shell_toml_back(self):
+        # shell.toml is swapped, then the level file cannot be written.
+        original = '[font]\nsize = 12\n\n[bar]\nposition = "top"\n'
+        self.h.toml.write_text(original)
+        self.h.toml.chmod(0o600)
+        self.h.level.write_text('glass\n')
+        with self.failing_replace('level'):
+            self.assertEqual(self.h.run('solid'), 1)
+        self.assertEqual(self.h.toml.read_text(), original)
+        self.assertEqual(stat.S_IMODE(self.h.toml.stat().st_mode), 0o600)
+        self.assertEqual(self.h.level.read_text(), 'glass\n')
+        self.assertFalse(self.h.pending.exists())
+        self.assertEqual(self.h.leftovers(), [])
+
+    def test_level_file_failure_removes_a_shell_toml_it_created(self):
+        with self.failing_replace('level'):
+            self.assertEqual(self.h.run('solid'), 1)
+        self.assertFalse(self.h.toml.exists())
+        self.assertFalse(self.h.level.exists())
+        self.assertFalse(self.h.pending.exists())
+
+    def test_change_that_could_not_be_undone_is_finished_by_the_next_run(self):
+        # The level file cannot be written and shell.toml cannot be put back.
+        self.h.toml.write_text('[font]\nsize = 12\n')
+        self.h.level.write_text('glass\n')
+        with self.failing_replace('level', 'shell.toml'):
+            self.assertEqual(self.h.run('solid'), 1)
+        self.assertTrue(g.holds(self.h.toml.read_text(), 'solid'))
+        self.assertEqual(self.h.level.read_text(), 'glass\n')
+        self.assertEqual(self.h.pending.read_text(), 'solid\n')
+        # Asking for the level is enough to finish it.
+        done = self.h.cli()
+        self.assertEqual((done.returncode, done.stdout), (0, 'solid\n'))
+        self.assertEqual(self.h.level.read_text(), 'solid\n')
+        self.assertFalse(self.h.pending.exists())
+
+    def test_run_killed_between_the_two_files_is_finished_by_the_next_run(self):
+        self.h.toml.write_text('[font]\nsize = 12\n')
+        self.h.level.write_text('glass\n')
+
+        # A real run, killed after shell.toml was swapped and before the level file.
+        code = ('import importlib.machinery, importlib.util, os, signal, sys\n'
+                'loader = importlib.machinery.SourceFileLoader("g", sys.argv[1])\n'
+                'g = importlib.util.module_from_spec(importlib.util.spec_from_loader("g", loader))\n'
+                'loader.exec_module(g)\n'
+                'real = g.write_level\n'
+                'def write_level(path, level):\n'
+                '    if os.path.basename(path) == "level":\n'
+                '        os.kill(os.getpid(), signal.SIGKILL)\n'
+                '    real(path, level)\n'
+                'g.write_level = write_level\n'
+                'sys.exit(g.main(["glass-level", "frosted"]))\n')
+        done = subprocess.run([sys.executable, '-c', code, str(SCRIPT)], env=self.h.env,
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, -signal.SIGKILL)
+        self.assertTrue(g.holds(self.h.toml.read_text(), 'frosted'))
+        self.assertEqual(self.h.level.read_text(), 'glass\n')
+        self.assertEqual(self.h.pending.read_text(), 'frosted\n')
+        # The next change finishes the earlier one first, then makes its own.
+        self.assertEqual(self.h.cli('next').stdout, 'solid\n')
+        self.assertEqual(self.h.level.read_text(), 'solid\n')
+        self.assertFalse(self.h.pending.exists())
+
+    def test_note_for_a_change_that_never_happened_is_dropped(self):
+        # Killed after the note was written and before shell.toml was swapped.
+        self.h.run('glass')
+        self.h.pending.write_text('solid\n')
+        self.assertEqual(self.h.cli().stdout, 'glass\n')
+        self.assertFalse(self.h.pending.exists())
+        self.assertTrue(g.holds(self.h.toml.read_text(), 'glass'))
+        self.h.pending.write_text('not a level\n')
+        self.assertEqual(self.h.run('frosted'), 0)
+        self.assertFalse(self.h.pending.exists())
+
+    def test_stop_request_waits_for_both_files(self):
+        self.h.toml.write_text('[font]\nsize = 12\n')
+        real = g.write_level
+
+        def interrupted(path, level):
+            if Path(path) == self.h.level:
+                os.kill(os.getpid(), signal.SIGTERM)   # arrives between the two files
+            return real(path, level)
+
+        with patch.object(g, 'write_level', side_effect=interrupted):
+            with self.assertRaises(SystemExit):
+                self.h.run('solid')
+        self.assertTrue(g.holds(self.h.toml.read_text(), 'solid'))
+        self.assertEqual(self.h.level.read_text(), 'solid\n')
+        self.assertFalse(self.h.pending.exists())
 
     def test_killed_run_leaves_the_file_whole_and_is_cleaned_up(self):
         original = '[font]\nsize = 12\n'

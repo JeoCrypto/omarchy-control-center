@@ -47,7 +47,14 @@ Percentages are how opaque the surface is.
 2. **A few keys in `~/.config/omarchy/shell.toml`**, each ending in `# glass-level`. This is Omarchy's own per-machine override file for shell surfaces, and the shell reloads it live. The keys set the background opacity of the bar, popups, notifications, menu and launcher, and their glass-edge borders. They are merged into the tables you already have: a `[bar]` of your own keeps its other settings and is not repeated. Anything else in the file, such as the `[font]` section that `omarchy display text size` writes, is left alone.
 3. **It runs `hyprctl reload`**, so Hyprland runs `glass.lua` again.
 
-**How the file is changed.** Each change is one transaction: one `glass-level` runs at a time (a lock in `~/.config/glass/.lock`), the new contents are checked to be valid and to differ from the old only in these keys, and the file is swapped into place in one step with its permissions kept. `~/.config/glass/level` is written only after that. If the check fails or the command is interrupted, `shell.toml` stays exactly as it was and the command says why. A `shell.toml` that is a symlink stays a symlink. A block between `# glass-level: start` and `# glass-level: end` from version 1.0.1 or earlier is converted the first time you change the level.
+**How the files are changed.** Each change is one transaction over `shell.toml` and the level file. One `glass-level` runs at a time (a lock in `~/.config/glass/.lock`). The new contents of `shell.toml` are checked to be valid and to differ from the old only in these keys, and the file is swapped into place in one step with its permissions kept. Then `~/.config/glass/level` is written the same way.
+
+- If anything fails before `shell.toml` is swapped, nothing was changed and the command says why.
+- If the level file cannot be written after that, `shell.toml` is put back as it was.
+- A request to stop (Ctrl+C, `kill`) waits until both files are done.
+- For the length of the change, the level being set is noted in `~/.config/glass/.pending`. If a run is killed outright between the two files, or cannot put `shell.toml` back, the note stays. The next run of `glass-level`, including the one that only prints the level, finishes the change: when `shell.toml` holds the noted level, the level file is set to it. Until then the two files can disagree.
+
+A `shell.toml` that is a symlink stays a symlink. A block between `# glass-level: start` and `# glass-level: end` from version 1.0.1 or earlier is converted the first time you change the level.
 
 `glass.lua` is read-only: it reads the level and the theme's accent colour, then sets blur, the opacity of windows Omarchy tags as see-through, a blur rule for the shell's layers, and gradient window borders. It overrides these Hyprland settings from wherever else you set them: `decoration.inactive_opacity`, `decoration.blur.enabled/size/passes`, and `general.col.active_border/inactive_border`.
 

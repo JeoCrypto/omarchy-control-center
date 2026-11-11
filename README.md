@@ -157,7 +157,7 @@ If you installed glass level, [docs/glass-level.md](docs/glass-level.md#remove) 
 python3 -m unittest discover -s tests -v
 ```
 
-Tests cover the helper runner (one report per run, including a helper that cannot be started or overruns, and no processes left behind) and `glass-level` (existing tables, the block from earlier versions, invalid files, interrupted and concurrent updates, permissions and symlinks). The Quickshell cases run in a throwaway Quickshell instance and are skipped without Quickshell and a Wayland session. `glass-level` is tested against a temporary home folder; your settings are not touched.
+Tests cover the helper runner (one report per run, including a helper that cannot be started or overruns, no processes left behind, and a cleanup that fails reported as a failure) and `glass-level` (existing tables, the block from earlier versions, invalid files, interrupted and concurrent updates, a failure or a kill between its two files, permissions and symlinks). The Quickshell cases run in a throwaway Quickshell instance and are skipped without Quickshell and a Wayland session. `glass-level` is tested against a temporary home folder; your settings are not touched.
 
 ## Requirements
 
